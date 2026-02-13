@@ -15,7 +15,8 @@ class WPOS_Activator {
             created_at datetime DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY  (id),
             KEY source_node_id (source_node_id),
-            KEY event_type (event_type)
+            KEY event_type (event_type),
+            KEY created_at (created_at)
         ) $charset_collate;";
 
         require_once( ABSPATH . 'wp-admin/includes/upgrade.php' );

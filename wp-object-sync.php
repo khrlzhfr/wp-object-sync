@@ -15,9 +15,9 @@ defined( 'ABSPATH' ) || exit;
 define( 'WPOS_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 
 // Check for required configuration constants
-if ( ! defined( 'WPOS_NODE_ID' ) || ! defined( 'WPOS_R2_BUCKET' ) ) {
+if ( ! defined( 'WPOS_NODE_ID' ) || ! defined( 'WPOS_S3_BUCKET' ) || ! defined( 'WPOS_S3_ACCESS_KEY' ) || ! defined( 'WPOS_S3_SECRET_KEY' ) || ! defined( 'WPOS_S3_ENDPOINT' ) ) {
     add_action( 'admin_notices', function() {
-        echo '<div class="error"><p>WP Object Sync: Missing configuration constants in wp-config.php</p></div>';
+        echo '<div class="error"><p>' . esc_html( 'WP Object Sync: Missing required configuration constants in wp-config.php.' ) . '</p></div>';
     } );
     return;
 }
@@ -30,6 +30,11 @@ require_once WPOS_PLUGIN_DIR . 'includes/class-wpos-syncer.php';
 
 // Activation Hook
 register_activation_hook( __FILE__, [ 'WPOS_Activator', 'activate' ] );
+
+// Deactivation Hook — unschedule cron so it doesn't fire after removal.
+register_deactivation_hook( __FILE__, function() {
+    wp_clear_scheduled_hook( 'wpos_sync_event' );
+} );
 
 // Initialize the Uploader (Listens for new files)
 new WPOS_Uploader();

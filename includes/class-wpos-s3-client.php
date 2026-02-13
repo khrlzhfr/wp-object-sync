@@ -8,82 +8,122 @@ class WPOS_S3_Client {
     private $bucket;
 
     public function __construct() {
-        $this->access_key = WPOS_R2_ACCESS_KEY;
-        $this->secret_key = WPOS_R2_SECRET_KEY;
-        $this->endpoint   = str_replace( ['https://', 'http://'], '', WPOS_R2_ENDPOINT );
-        $this->bucket     = WPOS_R2_BUCKET;
-        $this->region     = 'auto'; // R2 uses 'auto', S3 uses 'us-east-1' etc.
+        $this->access_key = WPOS_S3_ACCESS_KEY;
+        $this->secret_key = WPOS_S3_SECRET_KEY;
+        $this->endpoint   = str_replace( [ 'https://', 'http://' ], '', WPOS_S3_ENDPOINT );
+        $this->bucket     = WPOS_S3_BUCKET;
+        $this->region     = defined( 'WPOS_S3_REGION' ) ? WPOS_S3_REGION : 'auto';
     }
 
-    public function put_object( $file_path, $content ) {
-        return $this->request( 'PUT', $file_path, $content );
+    /**
+     * Upload a local file to the bucket.
+     */
+    public function put_object( $local_path, $remote_path, $content_type = '' ) {
+        $content = file_get_contents( $local_path );
+        if ( $content === false ) {
+            return false;
+        }
+        return $this->request( 'PUT', $remote_path, $content, $content_type );
     }
 
-    public function get_object( $file_path ) {
-        return $this->request( 'GET', $file_path );
+    /**
+     * Download an object. When $save_to is provided the response body is
+     * streamed straight to that file path (avoids holding it in memory).
+     */
+    public function get_object( $remote_path, $save_to = '' ) {
+        return $this->request( 'GET', $remote_path, '', '', $save_to );
     }
 
-    public function delete_object( $file_path ) {
-        return $this->request( 'DELETE', $file_path );
+    public function delete_object( $remote_path ) {
+        return $this->request( 'DELETE', $remote_path );
     }
 
-    private function request( $method, $path, $content = '' ) {
+    private function request( $method, $path, $content = '', $content_type = '', $save_to = '' ) {
+        // Capture both date formats once to avoid a midnight race condition.
+        $date_short = gmdate( 'Ymd' );
+        $date_long  = gmdate( 'Ymd\THis\Z' );
+
         $host = $this->bucket . '.' . $this->endpoint;
-        $url = 'https://' . $host . '/' . ltrim( $path, '/' );
-        
-        $headers = [
-            'Host' => $host,
-            'Date' => gmdate( 'Ymd\THis\Z' ),
-            'x-amz-content-sha256' => hash( 'sha256', $content ),
+
+        // URI-encode each path segment individually.
+        $encoded_path = '/' . implode( '/', array_map( 'rawurlencode', explode( '/', ltrim( $path, '/' ) ) ) );
+        $url          = 'https://' . $host . $encoded_path;
+
+        $payload_hash = hash( 'sha256', $content );
+
+        // Build the headers that will be signed (lowercase keys, sorted).
+        $sign_headers = [
+            'host'                 => $host,
+            'x-amz-content-sha256' => $payload_hash,
+            'x-amz-date'           => $date_long,
         ];
 
-        // Signature V4 Calculation
-        $kSecret = 'AWS4' . $this->secret_key;
-        $kDate = hash_hmac( 'sha256', gmdate( 'Ymd' ), $kSecret, true );
-        $kRegion = hash_hmac( 'sha256', $this->region, $kDate, true );
-        $kService = hash_hmac( 'sha256', 's3', $kRegion, true );
-        $kSigning = hash_hmac( 'sha256', 'aws4_request', $kService, true );
-
-        $canonical_uri = '/' . ltrim( $path, '/' );
-        $canonical_headers = "host:$host\nx-amz-content-sha256:{$headers['x-amz-content-sha256']}\nx-amz-date:{$headers['Date']}\n";
-        $signed_headers = 'host;x-amz-content-sha256;x-amz-date';
-        $payload_hash = $headers['x-amz-content-sha256'];
-
-        $canonical_request = "$method\n$canonical_uri\n\n$canonical_headers\n$signed_headers\n$payload_hash";
-        $string_to_sign = "AWS4-HMAC-SHA256\n{$headers['Date']}\n" . gmdate('Ymd') . "/{$this->region}/s3/aws4_request\n" . hash( 'sha256', $canonical_request );
-        $signature = hash_hmac( 'sha256', $string_to_sign, $kSigning );
-
-        $headers['Authorization'] = "AWS4-HMAC-SHA256 Credential={$this->access_key}/" . gmdate('Ymd') . "/{$this->region}/s3/aws4_request, SignedHeaders=$signed_headers, Signature=$signature";
-
-        // Execute cURL
-        $ch = curl_init( $url );
-        $curl_headers = [];
-        foreach ( $headers as $k => $v ) {
-            $curl_headers[] = "$k: $v";
+        if ( $content_type ) {
+            $sign_headers['content-type'] = $content_type;
         }
 
-        curl_setopt( $ch, CURLOPT_HTTPHEADER, $curl_headers );
-        curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
-        
+        ksort( $sign_headers );
+
+        $signed_headers_str = implode( ';', array_keys( $sign_headers ) );
+
+        $canonical_headers = '';
+        foreach ( $sign_headers as $k => $v ) {
+            $canonical_headers .= $k . ':' . trim( $v ) . "\n";
+        }
+
+        // AWS Signature V4
+        $scope             = "$date_short/{$this->region}/s3/aws4_request";
+        $canonical_request = "$method\n$encoded_path\n\n$canonical_headers\n$signed_headers_str\n$payload_hash";
+        $string_to_sign    = "AWS4-HMAC-SHA256\n$date_long\n$scope\n" . hash( 'sha256', $canonical_request );
+
+        $k_date    = hash_hmac( 'sha256', $date_short, 'AWS4' . $this->secret_key, true );
+        $k_region  = hash_hmac( 'sha256', $this->region, $k_date, true );
+        $k_service = hash_hmac( 'sha256', 's3', $k_region, true );
+        $k_signing = hash_hmac( 'sha256', 'aws4_request', $k_service, true );
+        $signature = hash_hmac( 'sha256', $string_to_sign, $k_signing );
+
+        // Request headers sent over the wire (Host is derived from the URL by
+        // the WordPress HTTP transport, so we omit it here to avoid duplicates).
+        $request_headers = [
+            'x-amz-date'           => $date_long,
+            'x-amz-content-sha256' => $payload_hash,
+            'Authorization'        => "AWS4-HMAC-SHA256 Credential={$this->access_key}/$scope, SignedHeaders=$signed_headers_str, Signature=$signature",
+        ];
+
+        if ( $content_type ) {
+            $request_headers['Content-Type'] = $content_type;
+        }
+
+        $args = [
+            'method'  => $method,
+            'headers' => $request_headers,
+            'timeout' => 30,
+        ];
+
         if ( $method === 'PUT' ) {
-            curl_setopt( $ch, CURLOPT_PUT, true );
-            curl_setopt( $ch, CURLOPT_INFILE, $this->string_to_stream( $content ) );
-            curl_setopt( $ch, CURLOPT_INFILESIZE, strlen( $content ) );
-        } elseif ( $method === 'DELETE' ) {
-            curl_setopt( $ch, CURLOPT_CUSTOMREQUEST, 'DELETE' );
+            $args['body'] = $content;
         }
 
-        $response = curl_exec( $ch );
-        $http_code = curl_getinfo( $ch, CURLINFO_HTTP_CODE );
-        curl_close( $ch );
+        if ( $save_to ) {
+            $args['stream']   = true;
+            $args['filename'] = $save_to;
+        }
 
-        return $http_code >= 200 && $http_code < 300 ? $response : false;
-    }
+        $response  = wp_remote_request( $url, $args );
+        $is_error  = is_wp_error( $response );
+        $http_code = $is_error ? 0 : wp_remote_retrieve_response_code( $response );
+        $success   = ! $is_error && $http_code >= 200 && $http_code < 300;
 
-    private function string_to_stream( $string ) {
-        $stream = fopen( 'php://memory', 'r+' );
-        fwrite( $stream, $string );
-        rewind( $stream );
-        return $stream;
+        // When streaming to a file, clean up on failure so we don't leave
+        // a partial / error-body file on disk.
+        if ( $save_to && ! $success && file_exists( $save_to ) ) {
+            @unlink( $save_to );
+        }
+
+        if ( ! $success ) {
+            return false;
+        }
+
+        return $save_to ? true : wp_remote_retrieve_body( $response );
     }
 }

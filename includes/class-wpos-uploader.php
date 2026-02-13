@@ -69,22 +69,20 @@ class WPOS_Uploader {
     }
 
     private function upload_file( $s3, $full_path, $relative_path ) {
-        $content = file_get_contents( $full_path );
-        if ( $content === false ) return;
+        $filetype     = wp_check_filetype( basename( $full_path ) );
+        $content_type = $filetype['type'] ?: 'application/octet-stream';
 
-        // Push to R2
-        $s3->put_object( $relative_path, $content );
-
-        // Log to DB
-        $this->log_event( $relative_path, 'upload' );
+        $result = $s3->put_object( $full_path, $relative_path, $content_type );
+        if ( $result !== false ) {
+            $this->log_event( $relative_path, 'upload' );
+        }
     }
 
     private function delete_file( $s3, $relative_path ) {
-        // Delete from R2
-        $s3->delete_object( $relative_path );
-
-        // Log to DB
-        $this->log_event( $relative_path, 'delete' );
+        $result = $s3->delete_object( $relative_path );
+        if ( $result !== false ) {
+            $this->log_event( $relative_path, 'delete' );
+        }
     }
 
     private function log_event( $path, $type ) {
